@@ -1,0 +1,36 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拾音 · 浏览器采集助手</title><style>body{font:17px/1.8 "Microsoft YaHei UI",sans-serif;background:#f3f5f8;color:#223047;margin:0}main{max-width:820px;margin:65px auto;padding:35px;background:white;border-radius:18px}h1{font-size:30px}a.button{display:inline-block;padding:12px 26px;background:#245cdd;color:white;border-radius:9px;text-decoration:none;font-weight:bold}li{margin:15px 0}p.small{font-size:14px;color:#65748b}code{background:#edf1f8;padding:3px 7px}textarea{width:100%;box-sizing:border-box;height:100px}strong{color:#245cdd}</style>
+<main><h1>把一整页链接带回拾音</h1><p>适用于你已在浏览器中正常打开、能够访问的论坛页面。采集当前页已经显示的链接，不自动登录、回复或读取隐藏内容。</p>
+<ol><li>把下面的蓝色按钮<strong>拖到浏览器书签栏</strong>。如未显示书签栏，按 <code>Ctrl + Shift + B</code>。</li>
+<p><a class="button" id="capture" href="#">拾音：采集本页</a></p>
+<li>打开 HIFINI 或其他论坛，完成网站要求的正常登录、校验，然后打开含分享链接的帖子。</li><li>点击书签栏里的“拾音：采集本页”。会弹出可复制的整页链接清单，按 <code>Ctrl + A</code>、<code>Ctrl + C</code>。</li><li>回到拾音，点击<strong>导入帖子文本</strong>，粘贴并识别。可以连续导入多个帖子，程序会去重。直链可批量下载，网盘链接可批量整理、复制。</li></ol>
+<p class="small">脚本只在点击书签时读取当前页面的链接及附近文字，不会向外部服务器发送数据。某些网站的浏览器策略会禁止书签脚本；这种情况直接复制帖子正文导入即可。自动识别的提取码请核对原帖。</p>
+<details><summary>查看书签脚本</summary><textarea id="script" readonly></textarea></details></main>
+<script>
+const capture = function () {
+  const links = Array.from(document.querySelectorAll('a[href]'));
+  const accepted = /(?:\.(?:flac|ape|wav|alac|aiff?|wv|tta|tak|dsf|dff|zip|rar|7z)(?:[?#]|$)|ctfile\.com|189\.cn|yun\.139\.com|123pan\.cn|pan\.baidu\.com|alipan\.com|aliyundrive\.com|pan\.quark\.cn|pan\.xunlei\.com|123pan\.com|123912\.com|123865\.com|115\.com|lanzou[a-z]?\.com|weiyun\.com|mega\.nz|mediafire\.com|gofile\.io|mypikpak\.com)/i;
+  const seen = new Set();
+  const parts = ['标题：' + document.title, '来源：' + location.href];
+  for (const a of links) {
+    const u = a.href;
+    if (!/^https?:/.test(u) || !accepted.test(u) || seen.has(u)) continue;
+    if (!a.getClientRects().length || getComputedStyle(a).visibility === 'hidden') continue;
+    seen.add(u);
+    const context = (a.closest('p,li,.message,.post-content') || a.parentElement).innerText || '';
+    const codes = Array.from(context.matchAll(/(?:提取码|访问码|密码)\s*[:：=]?\s*([A-Za-z0-9_-]{4,24})/g)).map(m => m[0]);
+    parts.push('\n' + (a.innerText || '资源链接') + '\n' + u + (codes.length ? '\n' + codes.join('；') : ''));
+  }
+  if (!seen.size) { alert('当前页未识别到已显示的资源链接。可以复制帖子正文到拾音导入。'); return; }
+  const panel = document.createElement('div');
+  panel.style.cssText = 'position:fixed;inset:8% 12%;z-index:2147483647;background:white;color:#223047;padding:22px;border:2px solid #245cdd;border-radius:14px;box-shadow:0 8px 80px #0008;font:16px sans-serif;display:flex;flex-direction:column;gap:12px';
+  const heading = document.createElement('div'); heading.textContent = '拾音：已整理 ' + seen.size + ' 条链接。复制后粘贴到“导入帖子文本”。';
+  const area = document.createElement('textarea'); area.value = parts.join('\n'); area.style.cssText = 'flex:1;width:100%;box-sizing:border-box;font:14px/1.6 monospace;resize:none';
+  const close = document.createElement('button'); close.textContent = '关闭'; close.style.cssText = 'padding:9px;cursor:pointer'; close.onclick = () => panel.remove();
+  panel.append(heading, area, close); document.body.append(panel); area.focus(); area.select();
+};
+const code = 'javascript:(' + capture.toString() + ')()';
+document.getElementById('capture').href = code;
+document.getElementById('capture').addEventListener('click', e => {e.preventDefault(); alert('请把这个按钮拖到书签栏，再到论坛页面点击书签。');});
+document.getElementById('script').value = code;
+</script></html>
