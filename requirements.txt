@@ -1,1 +1,2 @@
-# Runtime: Python standard library only, with Tkinter and Windows curl.exe.
+# Metadata reader for precise lyrics matching. Other runtime code uses stdlib.
+tinytag==2.3.2

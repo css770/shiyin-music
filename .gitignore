@@ -14,5 +14,7 @@ dist/
 settings.json
 links.json
 downloads/
+tools/
+baidupcs/
 Thumbs.db
 .DS_Store

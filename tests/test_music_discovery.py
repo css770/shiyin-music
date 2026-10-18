@@ -20,6 +20,70 @@ def close_test_root(root):
     root.destroy()
 
 class DiscoveryTests(unittest.TestCase):
+    def test_extras_settings_manual_candidates_and_visible_controls(self):
+        original_data = m.DATA
+        with tempfile.TemporaryDirectory() as tmp:
+            m.DATA = Path(tmp)
+            root = m.tk.Tk()
+            root.attributes('-alpha', 0)
+            try:
+                app = m.App(root)
+                app.notebook.select(app.extras_tab)
+                root.update()
+                self.assertTrue(app.lyric_tree.winfo_ismapped())
+                self.assertLess(app.extra_status.winfo_rooty() + app.extra_status.winfo_height(), root.winfo_rooty() + root.winfo_height())
+                app.auto_lyrics_enabled.set(False)
+                app.save()
+                settings = json.loads(app.config_path.read_text('utf-8'))
+                self.assertFalse(settings['auto_lyrics'])
+                self.assertEqual(settings['active_tab'], 'extras')
+                path = Path(tmp) / 'Artist - Track.wav'
+                app.emit('lyric_file', (path, '待匹配'))
+                app.poll()
+                row = app.lyric_paths[str(path.resolve())]
+                app.lyric_tree.selection_set(row)
+                app.manual_lyrics()
+                root.update()
+                self.assertTrue(any(isinstance(w, m.tk.Toplevel) for w in root.winfo_children()))
+                self.assertFalse(path.exists())
+            finally:
+                close_test_root(root)
+                m.DATA = original_data
+
+    def test_finished_direct_audio_triggers_lyrics_without_changing_file(self):
+        original_data = m.DATA
+        with tempfile.TemporaryDirectory() as tmp:
+            m.DATA = Path(tmp)
+            root = m.tk.Tk()
+            root.attributes('-alpha', 0)
+            try:
+                app = m.App(root)
+                app.folder.set(tmp)
+                item = {'url':'https://example.test/song.wav','name':'song','kind':'音频直链','code':'','source':'','status':'待下载'}
+                app.add_item(item)
+                path = Path(tmp) / 'Artist - Track.wav'
+                path.write_bytes(b'music-fixture')
+                called = threading.Event()
+                def match(audio, cancel):
+                    self.assertEqual(audio, path)
+                    called.set()
+                    return '未找到可靠匹配'
+                with patch.object(m, 'download_one', return_value=path), patch.object(m.extras, 'auto_lyrics', side_effect=match):
+                    app.start_download()
+                    self.assertTrue(called.wait(3))
+                    for _ in range(100):
+                        app.poll()
+                        if not app.downloading:
+                            break
+                        root.update()
+                        threading.Event().wait(0.01)
+                self.assertFalse(app.downloading)
+                self.assertEqual(path.read_bytes(), b'music-fixture')
+                self.assertIn(str(path.resolve()), app.lyric_paths)
+            finally:
+                close_test_root(root)
+                m.DATA = original_data
+
     def test_search_replaces_previous_results_without_touching_files(self):
         original_data, original_crawl = m.DATA, m.crawl
         with tempfile.TemporaryDirectory() as tmp:

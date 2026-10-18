@@ -1,4 +1,4 @@
-"""Local forum music link collector. Python 3.11+, standard library only."""
+"""Shiyin music discovery, lyrics and public-share download helper."""
 import concurrent.futures
 import csv
 import hashlib
@@ -23,6 +23,8 @@ import urllib.parse as up
 import urllib.request as ur
 import urllib.robotparser
 import webbrowser
+import music_extras as extras
+from music_extras_ui import ExtraFeatures
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 ASSETS = Path(getattr(sys, '_MEIPASS', BASE)) / 'assets' if getattr(sys, 'frozen', False) else BASE / 'assets'
@@ -631,7 +633,7 @@ def download_one(item, folder, cancel, emit):
             saved = json.loads(done_path.read_text('utf-8'))
             if saved.get('url') == url and saved.get('size') == target.stat().st_size:
                 status('已下载（跳过）')
-                return
+                return target
         if target.exists():
             raise ValueError('同名文件已存在且未验证，保留原文件')
         saved = {}
@@ -693,11 +695,12 @@ def download_one(item, folder, cancel, emit):
         done_path.write_text(json.dumps({'url': url, 'size': received}, ensure_ascii=False), 'utf-8')
         meta_path.unlink(missing_ok=True)
         status('完成')
+        return target
     except Exception as error:
         status('失败：' + str(error)[:100])
         emit('log', f'下载失败 {item["name"][:45]}：{error}')
 
-class App:
+class App(ExtraFeatures):
     def __init__(self, root):
         self.root = root
         self.events = queue.Queue()
@@ -725,7 +728,7 @@ class App:
             self.selected_sites = all_sites
         self.favorite_ids = set(self.settings.get('favorite_recommendations', []))
         self.recommendation_ids = []
-        root.title('拾音 1.5 · 论坛音乐链接助手')
+        root.title('拾音 1.6 · 音乐发现、歌词与网盘助手')
         root.geometry(f'{min(1440, root.winfo_screenwidth()-60)}x{min(1000, root.winfo_screenheight()-100)}')
         root.minsize(min(1120, root.winfo_screenwidth()-60), min(840, root.winfo_screenheight()-100))
         root.configure(bg='#f5f1e9')
@@ -848,7 +851,8 @@ class App:
         except (OSError, ValueError, KeyError, TypeError):
             pass
         self.build_discovery()
-        self.notebook.select(self.collect_tab if self.settings.get('active_tab') == 'collect' else self.discover_tab)
+        self.init_extras(DATA, SoftButton)
+        self.notebook.select(self.extras_tab if self.settings.get('active_tab') == 'extras' else self.collect_tab if self.settings.get('active_tab') == 'collect' else self.discover_tab)
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(150, self.poll)
 
@@ -1003,8 +1007,9 @@ class App:
         settings = {'sources': self.sources.get('1.0', 'end').strip(), 'selected_sites': [url for _, url, _ in BUILTIN_SITES if url in self.selected_sites], 'keyword': self.keyword.get(), 'folder': self.folder.get(),
                     'known_sites': [url for _, url, _ in BUILTIN_SITES], 'page_limit': self.limit.get(),
                     'favorite_recommendations': sorted(self.favorite_ids),
-                    'active_tab': 'collect' if self.notebook.select() == str(self.collect_tab) else 'discover',
+                    'active_tab': 'extras' if self.notebook.select() == str(self.extras_tab) else 'collect' if self.notebook.select() == str(self.collect_tab) else 'discover',
                     'discovery': {'region': self.discovery_region.get(), 'genre': self.discovery_genre.get(), 'mood': self.discovery_mood.get(), 'favorites_only': self.only_favorites.get()}}
+        settings.update(self.extra_settings())
         self.config_path.write_text(json.dumps(settings, ensure_ascii=False), 'utf-8')
         temporary = self.result_path.with_suffix('.tmp')
         temporary.write_text(json.dumps(list(self.items.values()), ensure_ascii=False, indent=2), 'utf-8')
@@ -1132,9 +1137,17 @@ class App:
         self.download_cancel.clear()
         self.download_button.configure(state='disabled')
         self.log(f'下载队列：{len(items)} 个文件，同时下载 2 个。')
+        automatic = self.auto_lyrics_enabled.get()
+        def download_and_lyrics(item):
+            path = download_one(item, folder, self.download_cancel, self.emit)
+            if path and path.suffix.lower() in extras.AUDIO_EXTS:
+                if automatic:
+                    self.match_lyrics_file(path, self.download_cancel)
+                else:
+                    self.emit('lyric_file', (path, '待匹配'))
         def worker():
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                futures = [pool.submit(download_one, item, folder, self.download_cancel, self.emit) for item in items]
+                futures = [pool.submit(download_and_lyrics, item) for item in items]
                 for future in concurrent.futures.as_completed(futures):
                     try:
                         future.result()
@@ -1261,7 +1274,9 @@ class App:
                 self.download_button.configure(state='normal')
                 self.log('下载队列已结束。失败项可选中后重试。')
                 self.save()
-        if self.closing and not self.downloading and not self.crawling:
+            else:
+                self.handle_extra_event(kind, value)
+        if self.closing and not self.downloading and not self.crawling and not self.extra_jobs:
             self.save()
             self.root.destroy()
             return
@@ -1270,10 +1285,11 @@ class App:
     def close(self):
         if self.closing:
             return
-        if self.crawling or self.downloading:
+        if self.crawling or self.downloading or self.extra_jobs:
             self.closing = True
             self.crawl_cancel.set()
             self.download_cancel.set()
+            self.extra_cancel.set()
             self.log('正在停止任务并保存临时文件，请稍候……')
             self.root.title('拾音 · 正在保存并退出')
         else:
