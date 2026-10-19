@@ -134,7 +134,7 @@ class DiscoveryTests(unittest.TestCase):
             try:
                 app = m.App(root)
                 new = {url for _,url,_ in m.BUILTIN_SITES[8:]}
-                self.assertEqual(len(new),7)
+                self.assertEqual(len(new),len(m.BUILTIN_SITES)-8)
                 self.assertTrue(new <= app.selected_sites)
                 self.assertIn('https://hifini.net/', app.selected_sites)
                 self.assertNotIn('http://www.23ape.net/', app.selected_sites)

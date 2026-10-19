@@ -25,6 +25,7 @@ import urllib.robotparser
 import webbrowser
 import music_extras as extras
 from music_extras_ui import ExtraFeatures
+import community_sources as community
 
 BASE = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 ASSETS = Path(getattr(sys, '_MEIPASS', BASE)) / 'assets' if getattr(sys, 'frozen', False) else BASE / 'assets'
@@ -149,6 +150,10 @@ BUILTIN_SITES = (
     ('挖音乐', 'https://www.wayinyue.com/', '专辑与歌手合集；部分需会员'),
     ('乐海拾贝', 'https://www.yuehaishibei.com/', 'WAV / FLAC / APE 网盘分享'),
     ('熊猫无损音乐网', 'https://xmyinyue.com/', '音乐合集与网盘分享；链接有效性待核对'),
+    ('百度贴吧 · 全站', 'https://tieba.baidu.com/', '关键词专站查询；受限时保留浏览器搜索入口'),
+    ('贴吧 · 无损音乐吧', 'https://tieba.baidu.com/f?kw=%E6%97%A0%E6%8D%9F%E9%9F%B3%E4%B9%90', '网友音乐分享；读取公开帖子和最多三页回复'),
+    ('贴吧 · Hi-Res 吧', 'https://tieba.baidu.com/f?kw=hires', '高解析音乐讨论与网友分享'),
+    ('过期罐头 · 音乐区', 'https://www.gqgtpc.com/forum.php?mod=forumdisplay&fid=23&filter=typeid&typeid=60', '公开音乐分享版块；站内搜索受限时可浏览器补充'),
 )
 LEGACY_SITE_URLS = {url for _, url, _ in BUILTIN_SITES[:8]}
 BLOG_HOSTS = {'yogoe.cn', 'wayinyue.com', 'yuehaishibei.com', 'xmyinyue.com'}
@@ -297,6 +302,7 @@ class PageParser(HTMLParser):
             self.current[1] += text
 
 def parse_resources(document, source, keyword=''):
+    document = community.prepare_document(document, source)
     parser = PageParser()
     parser.feed(document)
     title = ' '.join(parser.title).strip() or host(source)
@@ -306,7 +312,7 @@ def parse_resources(document, source, keyword=''):
     candidates = []
     navigation = []
     for href, label, pos in parser.links:
-        url = normalize(href, source)
+        url = normalize(community.unwrap_link(normalize(href, source), source))
         if not url:
             continue
         navigation.append((url, label))
@@ -314,7 +320,7 @@ def parse_resources(document, source, keyword=''):
         candidates.append((url, label, context))
     for match in re.finditer(r'https?://[^\s<>"\x27]+', visible):
         raw = match.group().rstrip('，。；、）)]}')
-        url = normalize(raw)
+        url = normalize(community.unwrap_link(normalize(raw), source))
         if url:
             candidates.append((url, '', visible[match.start():match.end() + 100]))
     results = []
@@ -443,6 +449,9 @@ class SearchFormParser(HTMLParser):
             self.current = None
 
 def find_search(document, base, keyword):
+    special = community.native_search(base, keyword)
+    if special:
+        return special
     parser = SearchFormParser()
     parser.feed(document)
     for form in parser.forms:
@@ -482,6 +491,14 @@ def crawl(seeds, keyword, limit, depth, cancel, emit):
     resources_count = [0]
     resource_urls = set()
     resumes = {}
+    domain_times = {}
+    def wait_for_domain(url):
+        with budget_lock:
+            key = community.site_key(url)
+            now = time.monotonic()
+            scheduled = max(now, domain_times.get(key, 0))
+            domain_times[key] = scheduled + 1.5
+        return cancel.wait(max(0, scheduled - time.monotonic()))
     def reserve():
         with budget_lock:
             if requests_count[0] >= limit or cancel.is_set() or time.monotonic() >= deadline:
@@ -502,8 +519,16 @@ def crawl(seeds, keyword, limit, depth, cancel, emit):
                 cookies.write_bytes(state['cookies'])
             policy = state.get('policy') or RobotPolicy(cancel, deadline)
             visited = state.get('visited', set())
-            todo = state.get('todo', [(seed, 0, None)])
-            searched = state.get('searched', False)
+            special = community.native_search(seed, keyword)
+            todo = state.get('todo', [(special[0], 0, special[1])] if special else [(seed, 0, None)])
+            searched = state.get('searched', bool(special))
+            fallback_sent = False
+            def fallback(reason):
+                nonlocal fallback_sent
+                entry = community.search_fallback(seed, keyword, reason)
+                if entry and not fallback_sent:
+                    emit('resource', entry)
+                    fallback_sent = True
             last_request = state.get('last_request', 0)
             found_here = state.get('found', 0)
             checked_here = 0
@@ -519,8 +544,9 @@ def crawl(seeds, keyword, limit, depth, cancel, emit):
                 emit('log', f'[{site}] ' + ('提交关键词搜索' if form_data else '读取 ') + url)
                 if not policy.allowed(url):
                     emit('log', f'[{site}] 跳过：robots.txt 禁止或无法确认，未读取帖子。')
+                    fallback('自动读取被限制')
                     continue
-                if cancel.wait(max(0, 1.5 - (time.monotonic() - last_request))):
+                if wait_for_domain(url):
                     return
                 last_request = time.monotonic()
                 try:
@@ -528,11 +554,13 @@ def crawl(seeds, keyword, limit, depth, cancel, emit):
                     if remaining <= 0:
                         break
                     document, final = fetch_page(url, cancel, cookies, form_data, timeout=min(10, remaining))
-                    if host(final).removeprefix('www.') != site.removeprefix('www.'):
+                    if not community.same_site(final, seed):
                         emit('log', f'[{site}] 跳过：转到了其他网站。')
+                        fallback('转到了校验页或其他网站')
                         return
                     if '/_guard/' in document or 'challenge-platform' in document:
                         emit('log', f'[{site}] 需要浏览器校验，已停止该站。')
+                        fallback('网站要求浏览器校验')
                         return
                     found, links, title, text = parse_resources(document, final, keyword)
                     if keyword and (not is_thread(final) or not keyword_match(title, keyword)):
@@ -558,12 +586,14 @@ def crawl(seeds, keyword, limit, depth, cancel, emit):
                     next_pages = []
                     for target, label in links:
                         target = up.urldefrag(target)[0]
-                        if host(target).removeprefix('www.') != site.removeprefix('www.') or target in visited or classify(target):
+                        if not community.same_site(target, seed) or target in visited or classify(target):
                             continue
                         if keyword and is_thread(target) and keyword_match(label, keyword):
                             emit('resource', {'title': label.strip(), 'name': label.strip(), 'kind': '相关帖子', 'url': target, 'code': '', 'source': target, 'status': '找到帖子，等待读取链接'})
                             with budget_lock:
                                 matches[0] += 1
+                            next_pages.append((target, level + 1, None))
+                        elif keyword and community.pagination(target, final, label):
                             next_pages.append((target, level + 1, None))
                         elif not keyword and level < depth and re.search(r'(thread|forum|viewtopic|topic|/t/|/p/|read|page=|fid=|tid=|下一页|下页)', target + label):
                             if not re.search(r'(logout|action=delete|action=reply|mod=post|register|login|attachment|download)', target, re.I):
@@ -574,6 +604,9 @@ def crawl(seeds, keyword, limit, depth, cancel, emit):
                         todo.extend(next_pages[:limit])
                 except Exception as error:
                     emit('log', f'[{site}] 失败：{str(error)[:160]}')
+                    fallback('自动访问未成功')
+            if not found_here:
+                fallback('未提取到公开下载链接')
             if todo and not cancel.is_set() and time.monotonic() < deadline:
                 resumes[seed] = {'cookies': cookies.read_bytes() if cookies.exists() else b'',
                                  'policy': policy, 'visited': visited, 'todo': todo,
@@ -728,7 +761,7 @@ class App(ExtraFeatures):
             self.selected_sites = all_sites
         self.favorite_ids = set(self.settings.get('favorite_recommendations', []))
         self.recommendation_ids = []
-        root.title('拾音 1.6 · 音乐发现、歌词与网盘助手')
+        root.title('拾音 1.7 · 音乐发现、歌词与社区搜索')
         root.geometry(f'{min(1440, root.winfo_screenwidth()-60)}x{min(1000, root.winfo_screenheight()-100)}')
         root.minsize(min(1120, root.winfo_screenwidth()-60), min(840, root.winfo_screenheight()-100))
         root.configure(bg='#f5f1e9')
@@ -807,6 +840,7 @@ class App(ExtraFeatures):
         SoftButton(bar, text='浏览器采集助手', command=self.browser_helper).pack(side='left')
         self.sites_button = SoftButton(bar, text=f'内置网站（已选 {len(self.selected_sites)}）', command=self.choose_sites)
         self.sites_button.pack(side='left', padx=6)
+        SoftButton(bar, text='社区搜索', command=self.community_search).pack(side='left')
         table_frame = ttk.Frame(outer)
         self.progress_label = ttk.Label(outer, text='准备就绪 · 关键词查询会优先使用论坛公开搜索入口', foreground='#356455', wraplength=1120)
         self.progress_label.pack(fill='x', pady=(0, 7))
@@ -844,7 +878,7 @@ class App(ExtraFeatures):
         ttk.Label(outer, text='提示：多选用 Ctrl / Shift；未选中时批量下载全部直链。* 提取码为自动识别，请核对原帖。扩展名不能证明音源音质。', foreground='#7a847c', font=('Microsoft YaHei UI', 9)).pack(anchor='w', pady=(7, 0))
         try:
             for item in json.loads(self.result_path.read_text('utf-8')):
-                if normalize(item.get('url', '')) and (classify(item['url']) or item.get('kind') == '相关帖子'):
+                if normalize(item.get('url', '')) and (classify(item['url']) or item.get('kind') in ('相关帖子', '搜索入口')):
                     if item.get('status', '').startswith(('连接', '0%', '1%')) or ' MB' in item.get('status', ''):
                         item['status'] = '待下载'
                     self.add_item(item)
@@ -1018,7 +1052,7 @@ class App(ExtraFeatures):
     def add_item(self, item):
         url = item['url']
         if url in self.items:
-            if item['kind'] == '相关帖子' and self.items[url].get('kind') == '相关帖子':
+            if item['kind'] in ('相关帖子', '搜索入口') and self.items[url].get('kind') == item['kind']:
                 self.items[url].update(item)
                 self.tree.set(self.row_ids[url], 'status', item['status'])
             return
@@ -1026,7 +1060,9 @@ class App(ExtraFeatures):
         self.row_ids[url] = self.tree.insert('', 'end', values=(item['kind'], item['name'], item.get('code', ''), host(item['source']), item['status']))
         cloud = sum(i['kind'] == '网盘' for i in self.items.values())
         posts = sum(i['kind'] == '相关帖子' for i in self.items.values())
-        self.count_label.configure(text=f'共 {len(self.items)} 条 · 相关帖子 {posts} · 直链 {len(self.items) - cloud - posts} · 网盘 {cloud} · 自动去重')
+        entries = sum(i['kind'] == '搜索入口' for i in self.items.values())
+        direct = sum(i['kind'] in ('音频直链', '压缩包直链') for i in self.items.values())
+        self.count_label.configure(text=f'共 {len(self.items)} 条 · 相关帖子 {posts} · 直链 {direct} · 网盘 {cloud} · 搜索入口 {entries} · 自动去重')
 
     def start_crawl(self):
         if self.crawling:
@@ -1195,7 +1231,7 @@ class App(ExtraFeatures):
             original_title = re.search(r'^标题：(.+)$', raw, re.MULTILINE)
             original_source = re.search(r'^来源：(https?://\S+)', raw, re.MULTILINE)
             # Escape pasted text so literal angle brackets do not disappear as HTML tags.
-            items, _, _, _ = parse_resources('<title>手动导入</title><pre>' + html.escape(raw) + '</pre>', 'https://manual.invalid/')
+            items, _, _, _ = parse_resources('<title>手动导入</title><pre>' + html.escape(raw) + '</pre>', normalize(original_source[1]) if original_source else 'https://manual.invalid/')
             for item in items:
                 item['source'] = normalize(original_source[1]) if original_source else ''
                 if original_title:
@@ -1228,6 +1264,27 @@ class App(ExtraFeatures):
         folder = filedialog.askdirectory()
         if folder:
             self.folder.set(folder)
+
+    def community_search(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title('贴吧与社区搜索')
+        dialog.geometry('680x310')
+        panel = ttk.Frame(dialog, padding=20)
+        panel.pack(fill='both', expand=True)
+        ttk.Label(panel, text='扩大搜索范围，找网友直接贴出的分享链接', font=('Microsoft YaHei UI', 14, 'bold')).pack(anchor='w')
+        keyword = tk.StringVar(value=self.keyword.get())
+        ttk.Entry(panel, textvariable=keyword).pack(fill='x', pady=12)
+        target = tk.StringVar(value='贴吧全站')
+        ttk.Combobox(panel, textvariable=target, state='readonly', values=('贴吧全站', '无损音乐吧', 'Hi-Res 吧', '贴吧网盘搜索', '豆瓣小组', '过期罐头音乐区')).pack(fill='x')
+        ttk.Label(panel, text='在浏览器打开对应搜索。找到帖子后复制地址回主界面搜集，或使用浏览器采集助手导入正文。', wraplength=620, foreground=MUTED).pack(anchor='w', pady=12)
+        def open_search():
+            text = keyword.get().strip()
+            if not text:
+                messagebox.showinfo('填写关键词', '先填写歌手、专辑或歌名。', parent=dialog)
+                return
+            webbrowser.open(community.browser_search(target.get(), text))
+            self.log('已打开社区搜索：' + target.get() + ' · ' + text)
+        SoftButton(panel, text='打开搜索', style='Accent.TButton', command=open_search).pack(anchor='e')
 
     def open_folder(self):
         try:
